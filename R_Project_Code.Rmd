@@ -1,0 +1,566 @@
+---
+title: "COVID-19 Project"
+author: "Shreshth Rathod"
+date: "5/6/2020"
+output: html_document
+---
+# Import packages
+```{r}
+require(plyr)
+require(dplyr)
+require(reshape2)
+require(readxl)
+require(ggplot2)
+require(ggrepel)
+require(scales)
+require(lubridate)
+require(data.table)
+```
+
+
+# Data Wrangling: Exploratory Variables (Population, Population, Number of Households, Per Capita Income, MetroNonMetro) 
+```{r}
+#  Import and merge exploratory variables: Population, Population, Number of Households, Per Capita Income, MetroNonMetro
+{
+
+Abbreviated_state = c("AL", "AZ", "CA", "CO", "CT", "FL", "GA", "IL", "IN", "LA", "MD", "MA", "MI", "MS", "MO", "NJ", "NY", "NC", "OH", "PA", "RI", "SC", "TN", "TX", "VA", "WA", "WI")
+FIPSState = c("1000", "4000","6000","8000","9000","12000","13000","17000","18000","22000","25000","24000","26000","29000","28000","37000","34000","36000","39000","42000","44000","45000","47000","48000","51000","53000","55000")
+# FIPSState is created because datasets have State name in the county column and it can be only removed by FIPS code to prevent any unnecessary data loss
+
+#  Population, Population Density, Number of Households
+Pop_PopDensity_HH = read_xlsx("County_Variables.xlsx", sheet = "Pop_Density, TotalHH, TotalPop")
+Pop_PopDensity_HH$FIPS = as.numeric(Pop_PopDensity_HH$FIPS) # removing trailing zeroes in order to merge by FIPS code with other Dataset
+Pop_PopDensity_HH$PopDensity2010 = round(Pop_PopDensity_HH$PopDensity2010,2) # Variable was in exponential form, so it has to be round off to 2 digit
+Pop_PopDensity_HH = Pop_PopDensity_HH %>% filter(State %in% Abbreviated_state) # Subsetting 27 States
+Pop_PopDensity_HH = Pop_PopDensity_HH %>% filter(!(FIPS %in% FIPSState)) # Removing State from county column
+
+# write.csv(Pop_PopDensity_HH, file = "Pop_PopDensity_HH.csv")
+
+
+#  Per Capita Income
+PCI = read_xlsx("County_Variables.xlsx", sheet = "PerCapita")
+PCI$FIPS = as.numeric(PCI$FIPS)
+PCI = PCI %>% filter(State %in% Abbreviated_state)  # Subsetting 27 States
+PCI = PCI %>% filter(!(FIPS %in% FIPSState))  # Removing State from county column
+
+# write.csv(PCI, file = "PCI.csv")
+
+
+MetroNonMetro = read_xlsx("ruralurbancodes2013-2.xlsx")
+MetroNonMetro$FIPS = as.numeric(MetroNonMetro$FIPS)  # removing trailing zeroes in order to merge by FIPS code with other Dataset
+MetroNonMetro = MetroNonMetro %>% filter(State %in% Abbreviated_state)  # Subsetting 27 States
+
+# write.csv(MetroNonMetro, file = "MetroNonMetro.csv")
+
+
+FINAL_COUNTY = merge(Pop_PopDensity_HH, PCI, by = "FIPS") # Merging POP Dataset and PCI on FIPS
+FINAL_COUNTY = merge(FINAL_COUNTY, MetroNonMetro, by = "FIPS") # Merging FINAL_COUNTY dataset with MetroNonMetro
+FINAL_COUNTY = FINAL_COUNTY %>% select(!c("State.y", "County.y", "State", "_Name")) # Removing unnecessary columns
+colnames(FINAL_COUNTY) = c("FIPS", "State", "County", "PopDensity2010", "Households", "Pop2010", "PCI", "MetroNonMetro") # Renaming Columns
+
+}
+
+# Collapse NYC 5 Counties in to one single New York City county
+{
+
+NYC5 = c("Bronx","New York","Richmond","Kings","Queens")
+FINAL_COUNTY_NYC5 = FINAL_COUNTY %>% filter(State == "NY" & County %in% NYC5) # fData is trimmed for 5 NYC Counties
+
+FINAL_COUNTY_NYC5$Income = FINAL_COUNTY_NYC5$PCI * FINAL_COUNTY_NYC5$Pop2010 # Calculate income for NYC 5 Counties
+FINAL_COUNTY_NYC5$Area2010 = FINAL_COUNTY_NYC5$Pop2010/FINAL_COUNTY_NYC5$PopDensity2010 # Calculate area for NYC 5 Counties
+FINAL_COUNTY_NYC=data.frame(t(colSums(FINAL_COUNTY_NYC5[c("Pop2010","Households","Income","Area2010")]))) # Calculate totals for NYC 5 Counties for Population, Household, Income, and Area
+
+FINAL_COUNTY_NYC$State = "NY" # Create State Variable
+FINAL_COUNTY_NYC$County = "New York City" # Create City Variable
+
+FINAL_COUNTY_NYC$PopDensity2010 = FINAL_COUNTY_NYC$Pop2010/FINAL_COUNTY_NYC$Area2010 # Calculate Pop Density for single NYC county 
+FINAL_COUNTY_NYC$PCI = FINAL_COUNTY_NYC$Income/FINAL_COUNTY_NYC$Pop2010  # Calculate Per Capita Income for single NYC county 
+
+FINAL_COUNTY_NYC = FINAL_COUNTY_NYC %>% select(!(c(`Area2010`))) # Remove Area
+FINAL_COUNTY_NYC$MetroNonMetro = "Metro" # Create Metro Variable
+FINAL_COUNTY_NYC$FIPS = 36999
+FINAL_COUNTY_NYC = FINAL_COUNTY_NYC[c("State","County","FIPS","MetroNonMetro","PopDensity2010","Pop2010","PCI","Households")]
+
+FINAL_COUNTY = rbind(FINAL_COUNTY,FINAL_COUNTY_NYC) # Add NYC into the main county dataset
+FINAL_COUNTY = FINAL_COUNTY %>% filter(!(State == "NY" & County %in% NYC5)) %>% droplevels() # Drop NYC 5 Counties into the main county dataset
+}
+
+write.csv(FINAL_COUNTY, file = "ExplanatoryVariables.csv") # Final dataset for explanatory variables
+```
+
+
+# Data Wrangling: Response Variable (COVID-19 Cases by Date)
+```{r}
+Abbreviated_state = c("AL", "AZ", "CA", "CO", "CT", "FL", "GA", "IL", "IN", "LA", "MD", "MA", "MI", "MS", "MO", "NJ", "NY", "NC", "OH", "PA", "RI", "SC", "TN", "TX", "VA", "WA", "WI")
+FullText_state = c("Alabama", "Arizona", "California", "Colorado", "Connecticut", "Florida", "Georgia", "Illinois", "Indiana", "Louisiana", "Maryland", "Massachusetts", "Michigan", "Mississippi", "Missouri", "New Jersey", "New York", "North Carolina", "Ohio", "Pennsylvania", "Rhode Island", "South Carolina", "Tennessee", "Texas", "Virginia", "Washington", "Wisconsin")
+
+CountyCases = read_xlsx("us-counties.xlsx") #Importing GITHUB county dataset
+colnames(CountyCases) = c("Date", "County","State","FIPS","Cases","Deaths") #Changing column names according to the preference
+CountyCases$State=mapvalues(CountyCases$State,from=FullText_state,to=Abbreviated_state) #Converting FullText State to Abbreviated State by mapping values to them
+
+CountyCases$FIPS=ifelse(CountyCases$County == "New York City" & is.na(CountyCases$FIPS),36999,CountyCases$FIPS) #Adding an imaginary FIPS code for New York City because GITHUB data consist NULL value for New York City.
+
+
+FINAL_COUNTY_CASES = merge(FINAL_COUNTY, CountyCases, by = "FIPS") #Merging FINAL_COUNTY(Explanatory variable dataset) with CountyCases(GITHUB Data)
+FINAL_COUNTY_CASES$DateAsInteger = as.integer(as.Date(FINAL_COUNTY_CASES$Date)) #Removing trailing zeroes
+FINAL_COUNTY_CASES = FINAL_COUNTY_CASES %>% filter(DateAsInteger <= as.integer(as.Date("2020-04-24"))) # Filter by End Date
+
+# 1996 counties for 27 states (contains NYC 5 counties)
+# 1992 counties for 27 states (contains 1 single NYC county)
+
+# obs = FINAL_COUNTY_CASES %>% filter(DateAsInteger == as.integer(as.Date("2020-04-24"))) # 1875
+# 1875 counties in 27 states (contains 1 single NYC county) for which cases have been reported
+# 1992 - 1875 = 117 counties in 27 states for which cases have NOT reported on 2020-04-24
+
+
+FINAL_COUNTY_CASES = FINAL_COUNTY_CASES %>% filter(Cases >= 5)  # Filter by cases > 5
+
+# obs = FINAL_COUNTY_CASES %>% filter(DateAsInteger == as.integer(as.Date("2020-04-24"))) # 1540
+# 1875 - 1540 = 335 counties in 27 states for which cases are less than 5 on 2020-04-24
+
+FINAL_COUNTY_CASES = FINAL_COUNTY_CASES %>% select(!c("County.y","State.y")) #Removing unnecessary columns 
+
+setnames(FINAL_COUNTY_CASES, old = c("State.x", "County.x"), new = c("State", "County")) #setnames function from data.table package is used to rename the columns as per our requirements.
+
+High_Hit_States = c("CA", "FL", "IL", "LA", "MA", "MI", "NY", "NJ", "PA")    #TOP 9 MOST HIT STATES
+Medium_Hit_States = c("CO", "CT", "GA", "IN", "MD", "OH", "TX", "VA", "WA")  #9 MEDIUM HIT STATES
+Low_Hit_States = c("AL", "AZ", "MS", "MO", "NC", "RI", "SC", "TN", "WI")    #9 LESS HIT STATES
+
+Low     = c(1,1,1,1,1,1,1,1,1) 
+Medium  = c(2,2,2,2,2,2,2,2,2)
+High    = c(3,3,3,3,3,3,3,3,3)
+
+FINAL_COUNTY_CASES$Impact = mapvalues(FINAL_COUNTY_CASES$State,from=c(High_Hit_States,Medium_Hit_States,Low_Hit_States),to=c(High,Medium,Low)) #Assigning values of Low to Low_Hit_States, values of Medium to Medium_Hit_States and values of High to High_Hit_States
+
+FINAL_COUNTY_CASES$Impact = factor(FINAL_COUNTY_CASES$Impact,levels=c(1:3),labels=c("Low","Medium","High")) #factor the levels from low -> medium -> high order
+
+write.csv(FINAL_COUNTY_CASES, file = "FINAL_COUNTY_CASES.csv") 
+```
+
+
+# Data Wrangling: States with Top 50 Cities (Top50PopulatedCities, Top50HighestTransitCities, & Top50MostWalkedCities)
+```{r}
+State_Variable = read_xlsx("State_List.xlsx") #Importing State level variables (almost made from scratch)
+
+State_Variable = State_Variable %>% select("State", "Top50PopulatedCities", "Top50HighestTransitCities", "Top50MostWalkedCities") #selecting these variables only to merge them further in the FINAL_COUNTY_CASES dataset by State.
+
+FINAL_COUNTY_CASES = merge(FINAL_COUNTY_CASES, State_Variable, by = "State") #Merging FINAL_COUNTY_CASES and State_Variable
+```
+
+
+# Data Exploration
+```{r}
+
+### Bar Graph - Cases vs states
+{
+FINAL_COUNTY_STATELVL = aggregate(Cases~DateAsInteger+Date+State+Impact,FINAL_COUNTY_CASES,FUN=sum) #aggregating Date, State, and Impact as independent variable and Cases as dependent variable. 
+FINAL_COUNTY_STATELVL_TotalCases = FINAL_COUNTY_STATELVL %>% filter(DateAsInteger==as.integer(as.Date("2020-04-24"))) 
+
+ylims_bar= c(5, 25000, 50000, 75000, 100000, 125000, 150000, 175000, 200000, 225000, 250000, 275000)
+ylabels_bar = c("> 5","25K","50K","75K","100K","125K","150K","175K","200K","225K","250K","275K")
+
+gSTATES_bar = ggplot(data=FINAL_COUNTY_STATELVL_TotalCases,
+                     aes(x=reorder(State,Cases),y=Cases,fill=Impact)) + theme_minimal() +
+              geom_bar(stat="identity",position="dodge2") +
+              geom_text(aes(y=Cases+8000,label=Cases),size=3) +
+              scale_y_continuous(breaks=ylims_bar,labels=ylabels_bar,expand=expansion(mult=c(.02,.02))) + 
+              scale_fill_manual(values=c("#00BA38","#619CFF","#F8766D"), 
+                                labels = c("Low (5K-10K)", "Medium (10K-25K)", "High (25K+)"),
+              guide=guide_legend(reverse = TRUE, title="Impact")) + 
+              labs(title="Top 27 States with COVID-19 Cases\n(02/24 - 04/24)",
+                   y="COVID-19 cases",
+                   x="States") +
+              theme(plot.title=element_text(size=12,color="black",hjust=0.5,face="bold"),
+                    axis.title.x=element_text(size=12,color="black",face="bold"),
+                    axis.title.y=element_text(size=12,color="black",face="bold"),
+                    axis.text.x=element_text(size=10,color="black"),
+                    axis.text.y=element_text(size=10,color="black")) +
+              theme(panel.grid.minor=element_blank(), panel.grid.major.y=element_blank()) + coord_flip()
+gSTATES_bar
+}
+
+### Counties in 27 States (Bar Chart)
+{
+CountyIn27States = data.frame(table(FINAL_COUNTY$State)) # Displays number of counties per state (NY contains 1 single NYC county, not NYC 5 counties)
+colnames(CountyIn27States) = c("State","CountyCount")
+sum(CountyIn27States$CountyCount) # 1992 counties for 27 states (NY contains 1 single NYC county, not NYC 5 counties)
+
+CountyReportedIn27States = data.frame(table(FINAL_COUNTY_CASES$State[FINAL_COUNTY_CASES$DateAsInteger==as.integer(as.Date("2020-04-24"))])) # Displays number of counties per state (NY contains 1 single NYC county, not NYC 5 counties)
+colnames(CountyReportedIn27States) = c("State","CountyReported")
+sum(CountyReportedIn27States$CountyReported) # 1540 counties for 27 states (NY contains 1 single NYC county, not NYC 5 counties)
+
+CountyIn27States = merge(CountyIn27States,CountyReportedIn27States,by="State")
+
+ylims_countybar = c(0, 25, 50, 75, 100, 125, 150, 175, 200, 225, 250, 275)
+ylabels_countybar = c("0","25","50","75","100","125","150","175","200","225","250","275")
+
+gState_countybar = ggplot(data=CountyIn27States,aes(x=reorder(State,CountyCount),y=CountyCount,color=)) + theme_minimal() +
+              geom_bar(alpha=.5,stat="identity",position="dodge2") + 
+              geom_bar(aes(y=CountyReported),stat="identity",position="dodge2") +
+              scale_y_continuous(breaks=ylims_countybar,labels=ylabels_countybar,expand=expansion(mult=c(.02,.02))) +
+              labs(title="",
+                   y="Number of Counties",
+                   x="States") +
+              theme(plot.title=element_text(size=12,color="black",hjust=0.5,face="bold"),
+                    axis.title.x=element_text(size=12,color="black",face="bold"),
+                    axis.title.y=element_text(size=12,color="black",face="bold"),
+                    axis.text.x=element_text(size=10,color="black"),
+                    axis.text.y=element_text(size=10,color="black")) +
+              theme(panel.grid.minor=element_blank(), panel.grid.major.x=element_blank()) 
+gState_countybar
+}
+
+### Linear Graph - NYNJ Outlier
+{
+ylims= c(5, 25000, 50000, 75000, 100000, 125000, 150000, 175000, 200000, 225000, 250000, 275000)
+ylabels = c("> 5","25K","50K","75K","100K","125K","150K","175K","200K","225K","250K","275K")
+
+FINAL_COUNTY_STATELVL = aggregate(Cases~DateAsInteger+Date+State,FINAL_COUNTY_CASES,FUN=sum)
+
+# To simply color NY and NJ
+FINAL_COUNTY_STATELVL$NYNJ=ifelse(FINAL_COUNTY_STATELVL$State=="NY"|FINAL_COUNTY_STATELVL$State=="NJ",1,0) 
+FINAL_COUNTY_STATELVL$NYNJ=factor(FINAL_COUNTY_STATELVL$NYNJ,levels=c(0:1),labels=c("no","yes"))
+
+# Green = 00BA38, BLue = 619CFF, Red = F8766D
+gCOUNTIES_linear=ggplot(data=FINAL_COUNTY_STATELVL,aes(x=Date,y=Cases,group=State,color=NYNJ)) + theme_minimal() +
+                  scale_y_continuous(breaks=ylims,labels=ylabels,expand=expansion(mult=c(.02,.02))) +
+                  coord_cartesian(ylim=c(-2000,275000),xlim=c(ymd(20200224,tz="UTC"),ymd(20200426,tz="UTC"))) +
+                  geom_line(size=1) +
+                  geom_point(size=1.5) +
+                  geom_text_repel(data=FINAL_COUNTY_STATELVL %>% 
+                                  filter(DateAsInteger==as.integer(as.Date("2020-04-24")) & State %in% c("NY","NJ")),
+                                  aes(x=Date,y=Cases,
+                                  label=paste(State,": ",Cases,sep="")),nudge_y=-25000,nudge_x=ymd(20200426,tz="UTC"),
+                                  size=3,segment.size=.05,show.legend=FALSE) +
+                  scale_color_manual(values=c("#708090","#F8766D")) +
+                  theme(legend.position="none") +
+                  labs(title="COVID-19 cases in the U.S.\n(Top 27 states, 02/24 - 04/24)",
+                       y="COVID-19 cases",
+                       x="Date") +
+                  theme(plot.title=element_text(size=12,color="black",hjust=0.5,face="bold"),
+                        axis.title.x=element_text(size=12,color="black",face="bold"),
+                        axis.title.y=element_text(size=12,color="black",face="bold"),
+                        axis.text.x=element_text(size=10,color="black"),
+                        axis.text.y=element_text(size=10,color="black")) +
+                  theme(panel.grid.minor=element_blank()) 
+gCOUNTIES_linear
+}
+
+### Linear Graph Zoomed 
+{
+ylims = c(5,5000,10000,25000,50000)
+ylabels = c("> 5","5K","10K","25K","50K")
+
+FINAL_COUNTY_STATELVL = aggregate(Cases~DateAsInteger+Date+State+Impact,FINAL_COUNTY_CASES,FUN=sum)
+
+gSTATES_linear_zoom = ggplot(data=FINAL_COUNTY_STATELVL,aes(x=Date,y=Cases,group=State,color=Impact)) +   
+                      theme_minimal() +
+                      scale_y_continuous(breaks=ylims,labels=ylabels,limits=c(0,NA),expand=expansion(mult=c(.01,.02))) +
+                      coord_cartesian(ylim=c(0,51000),xlim=c(ymd(20200224,tz="UTC"),ymd(20200430,tz="UTC"))) +
+                      geom_line(size=1) +
+                      geom_point(size=1.5) +
+                      geom_text_repel(data=FINAL_COUNTY_STATELVL %>% 
+                                  filter(DateAsInteger == as.integer(as.Date("2020-04-24")) & !State %in% c("NY","NJ")),
+                                  aes(x=Date,y=Cases,
+                                  label=paste(State,": ",Cases,sep="")),nudge_y=5000,nudge_x=ymd(20200430,tz="UTC"),
+                                  size=2.5,segment.size=.05,show.legend=FALSE) +
+                      annotate(data=FINAL_COUNTY_STATELVL %>% 
+                                  filter(DateAsInteger==as.integer(as.Date("2020-04-24")) & State %in% c("NY")),
+                                  geom="text",label=paste("^NY",": 271618 ","",sep=""),x=ymd(20200403,tz="UTC"),
+                                  y=51000,size=2.5,color="#F8766D") +
+                      annotate(data=FINAL_COUNTY_STATELVL %>% 
+                                  filter(DateAsInteger==as.integer(as.Date("2020-04-24")) & State %in% c("NJ")),
+                                  geom="text",label=paste("^NJ",": 101664","",sep=""),x=ymd(20200415,tz="UTC"),y=51000,size=2.5,color="#F8766D") + 
+                      scale_color_manual(values=c("#00BA38","#619CFF","#F8766D")) +
+                      labs(title="Top 27 States with COVID-19 Cases\n(02/24 - 04/24)",
+                           y="COVID-19 cases",
+                           x="Date") +
+                      theme(plot.title=element_text(size=12,color="black",hjust=0.5,face="bold"),
+                            axis.title.x=element_text(size=12,color="black",face="bold"),
+                            axis.title.y=element_text(size=12,color="black",face="bold"),
+                            axis.text.x=element_text(size=10,color="black"),
+                            axis.text.y=element_text(size=10,color="black")) +
+                      theme(panel.grid.minor=element_blank()) + theme(legend.position = "none")
+gSTATES_linear_zoom
+}
+
+### Log Graph
+{        
+ylims_log = c(0,5,10,5000,10000,25000,275000)
+ylabels_log = c("log 0","log 5","log 10","log 5K","log 10K","log 25K","log 275K")
+
+FINAL_COUNTY_CASES_STATE_lvl = aggregate(Cases~DateAsInteger+Date+State+Impact,FINAL_COUNTY_CASES,FUN=sum)
+
+
+gSTATES_log =  ggplot(data=FINAL_COUNTY_CASES_STATE_lvl,aes(x=Date,y=Cases,group=State,color=Impact)) + theme_minimal() +
+                  scale_y_continuous(trans="log10",breaks=ylims_log,labels=ylabels_log,expand=expansion(mult=c(.02,.02))) +
+                  coord_cartesian(xlim=c(ymd(20200224,tz="UTC"),ymd(20200505,tz="UTC"))) +
+                  geom_line(size=1) +
+                  geom_point(size=1.5) +
+                  geom_text_repel(data=FINAL_COUNTY_CASES_STATE_lvl %>% 
+                                  filter(DateAsInteger==as.integer(as.Date("2020-04-24"))),
+                                  aes(x=Date,y=Cases,label=paste(State,": ",Cases,sep="")),nudge_y=-log(3.5),nudge_x=ymd(20200424,tz="UTC"),
+                                  size=3,segment.size=.05,show.legend=FALSE) +
+                  scale_color_manual(values=c("#00BA38","#619CFF","#F8766D"),
+                                     guide=guide_legend(reverse=TRUE),name=element_blank()) +
+                  labs(title="Top 27 States with COVID-19 Cases\n(02/24 - 04/24)",
+                       y="COVID-19 cases",
+                       x="Date") +
+                  theme(plot.title=element_text(size=12,color="black",hjust=0.5,face="bold"),
+                        axis.title.x=element_text(size=12,color="black",face="bold"),
+                        axis.title.y=element_text(size=12,color="black",face="bold"),
+                        axis.text.x=element_text(size=10,color="black"),
+                        axis.text.y=element_text(size=10,color="black")) +
+                  theme(panel.grid.minor=element_blank()) + theme(legend.position = "none")
+gSTATES_log
+}
+
+
+
+#Exploratory Variables
+
+### Bar Graph - FINAL_STATES_Top50PopulatedCities
+{
+FINAL_COUNTY_STATELVL = aggregate(Cases~DateAsInteger+Date+State+Top50PopulatedCities,FINAL_COUNTY_CASES,FUN=sum)
+FINAL_COUNTY_STATELVL_TotalCases = FINAL_COUNTY_STATELVL %>% filter(DateAsInteger==as.integer(as.Date("2020-04-24")))
+
+ylims_bar= c(5, 25000, 50000, 75000, 100000, 125000, 150000, 175000, 200000, 225000, 250000, 275000)
+ylabels_bar = c("> 5","25K","50K","75K","100K","125K","150K","175K","200K","225K","250K","275K")
+
+gSTATES_bar_POP = ggplot(data=FINAL_COUNTY_STATELVL_TotalCases,
+                     aes(x=reorder(State,Cases),y=Cases,fill=Top50PopulatedCities)) + theme_minimal() +
+              geom_bar(stat="identity",position="dodge2") +
+              scale_y_continuous(breaks=ylims_bar,labels=ylabels_bar,expand=expansion(mult=c(.02,.02))) + 
+              scale_fill_manual(values=c("#00BA38","#F8766D"), 
+              guide=guide_legend(reverse = TRUE, title="State with ≥ 1\ntop 50 populated\nU.S. city")) + 
+              labs(title="Top 27 States with COVID-19 Cases\n(02/24 - 04/24)",
+                   y="COVID-19 cases",
+                   x="States") +
+              theme(plot.title=element_text(size=12,color="black",hjust=0.5,face="bold"),
+                    axis.title.x=element_text(size=10,color="black",face="bold"),
+                    axis.title.y=element_text(size=12,color="black",face="bold"),
+                    axis.text.x=element_text(size=7,color="black"),
+                    axis.text.y=element_text(size=10,color="black")) +
+              theme(panel.grid.minor=element_blank(), panel.grid.major.y=element_blank()) +
+              theme(legend.position = c(.45, .95),
+                        legend.justification = c("right", "top"),
+                        legend.box.just = "right",
+                        legend.margin = margin(6, 6, 6, 6))
+gSTATES_bar_POP
+}
+
+### Bar Graph - FINAL_STATES_Top50HighestTransitCities
+{
+FINAL_COUNTY_STATELVL = aggregate(Cases~DateAsInteger+Date+State+Top50HighestTransitCities,FINAL_COUNTY_CASES,FUN=sum)
+FINAL_COUNTY_STATELVL_TotalCases = FINAL_COUNTY_STATELVL %>% filter(DateAsInteger==as.integer(as.Date("2020-04-24")))
+
+ylims_bar= c(5, 25000, 50000, 75000, 100000, 125000, 150000, 175000, 200000, 225000, 250000, 275000)
+ylabels_bar = c("> 5","25K","50K","75K","100K","125K","150K","175K","200K","225K","250K","275K")
+
+gSTATES_bar_HIGH_TRANSIT = ggplot(data=FINAL_COUNTY_STATELVL_TotalCases,
+                     aes(x=reorder(State,Cases),y=Cases,fill=Top50HighestTransitCities)) + theme_minimal() +
+              geom_bar(stat="identity",position="dodge2") +
+              scale_y_continuous(breaks=ylims_bar,labels=ylabels_bar,expand=expansion(mult=c(.02,.02))) + 
+              scale_fill_manual(values=c("#00BA38","#F8766D"), 
+              guide=guide_legend(reverse = TRUE, title="State with ≥ 1\ntop 50 public transit\nU.S. city")) + 
+              labs(title="Top 27 States with COVID-19 Cases\n(02/24 - 04/24)",
+                   y="COVID-19 cases",
+                   x="States") +
+              theme(plot.title=element_text(size=12,color="black",hjust=0.5,face="bold"),
+                    axis.title.x=element_text(size=10,color="black",face="bold"),
+                    axis.title.y=element_text(size=12,color="black",face="bold"),
+                    axis.text.x=element_text(size=7,color="black"),
+                    axis.text.y=element_text(size=10,color="black")) +
+              theme(panel.grid.minor=element_blank(), panel.grid.major.y=element_blank()) +
+              theme(legend.position = c(.45, .95),
+                        legend.justification = c("right", "top"),
+                        legend.box.just = "right",
+                        legend.margin = margin(6, 6, 6, 6))
+gSTATES_bar_HIGH_TRANSIT
+}
+
+### Bar Graph - FINAL_STATES_Top50MostWalkedCities
+{
+FINAL_COUNTY_STATELVL = aggregate(Cases~DateAsInteger+Date+State+Top50MostWalkedCities,FINAL_COUNTY_CASES,FUN=sum)
+FINAL_COUNTY_STATELVL_TotalCases = FINAL_COUNTY_STATELVL %>% filter(DateAsInteger==as.integer(as.Date("2020-04-24")))
+
+ylims_bar= c(5, 25000, 50000, 75000, 100000, 125000, 150000, 175000, 200000, 225000, 250000, 275000)
+ylabels_bar = c("> 5","25K","50K","75K","100K","125K","150K","175K","200K","225K","250K","275K")
+
+gSTATES_bar_WALK = ggplot(data=FINAL_COUNTY_STATELVL_TotalCases,
+                     aes(x=reorder(State,Cases),y=Cases,fill=Top50MostWalkedCities)) + theme_minimal() +
+              geom_bar(stat="identity",position="dodge2") +
+              scale_y_continuous(breaks=ylims_bar,labels=ylabels_bar,expand=expansion(mult=c(.02,.02))) + 
+              scale_fill_manual(values=c("#00BA38","#F8766D"), 
+              guide=guide_legend(reverse = TRUE, title="State with ≥ 1\ntop 50 walkable\nU.S. city")) + 
+              labs(title="Top 27 States with COVID-19 Cases\n(02/24-04/24)",
+                   y="COVID-19 cases",
+                   x="States") +
+              theme(plot.title=element_text(size=12,color="black",hjust=0.5,face="bold"),
+                    axis.title.x=element_text(size=10,color="black",face="bold"),
+                    axis.title.y=element_text(size=12,color="black",face="bold"),
+                    axis.text.x=element_text(size=7,color="black"),
+                    axis.text.y=element_text(size=10,color="black")) +
+              theme(panel.grid.minor=element_blank(), panel.grid.major.y=element_blank()) +
+              theme(legend.position = c(.45, .95),
+                        legend.justification = c("right", "top"),
+                        legend.box.just = "right",
+                        legend.margin = margin(6, 6, 6, 6))
+gSTATES_bar_WALK
+}
+
+
+
+
+
+
+### Log Graph - Pop County wise
+{
+FINAL_COUNTY_COUNTYLVL = aggregate(Cases~DateAsInteger+Date+County+Pop2010,FINAL_COUNTY_CASES,FUN=sum)
+
+ylims_log = c(0,5,10,5000,10000,25000,150000)
+ylabels_log = c("log 0","log 5","log 10","log 5K","log 10K","log 25K","log 150K")
+
+gCOUNTY_log_POP =  ggplot(data=FINAL_COUNTY_COUNTYLVL,aes(x=Date,y=Cases, color = Pop2010)) + theme_minimal() +
+                  scale_y_continuous(trans="log10",breaks=ylims_log,labels=ylabels_log,expand=expansion(mult=c(.02,.02))) + 
+                  coord_cartesian(xlim=c(ymd(20200224,tz="UTC"),ymd(20200505,tz="UTC"))) +
+                  geom_point(size=1.5) +  labs(colour = "Total Population") +
+                  geom_text_repel(data=FINAL_COUNTY_COUNTYLVL %>% 
+                                  filter(DateAsInteger==as.integer(as.Date("2020-04-24")) & County %in% c("New York City")),
+                                  aes(x=Date,y=Cases,label=paste(County,": ",Cases,sep="")),nudge_y = -log(1.5),nudge_x=ymd(20200424,tz="UTC"),
+                                  size=3,segment.size=.05,show.legend=FALSE) +
+                                    labs(title="Counties with COVID-19 Cases\n(02/24 - 04/24)",
+                       y="COVID-19 cases",
+                       x="Date") +
+                  theme(plot.title=element_text(size=12,color="black",hjust=0.5,face="bold"),
+                        axis.title.x=element_text(size=12,color="black",face="bold"),
+                        axis.title.y=element_text(size=12,color="black",face="bold"),
+                        axis.text.x=element_text(size=10,color="black"),
+                        axis.text.y=element_text(size=10,color="black")) +
+                  theme(panel.grid.minor=element_blank()) 
+gCOUNTY_log_POP
+}
+
+### Scatter plot - Pop County wise
+{
+ylims_log = c(0,5,10,100,1000, 10000,100000, 150000)
+ylabels_log = c("log 0","log 5","log 10","log 100","log 1000","log 10K","log 100K","log 150K")
+
+xlabels = c("1","2500000","5000000","7500000","10000000")
+
+gCOUNTY_log_Scatter_POP = ggplot(FINAL_COUNTY_CASES %>% filter(DateAsInteger == as.integer(as.Date("2020-04-24"))) , aes(x = Pop2010 , y = Cases)) + theme_minimal() + scale_y_continuous(trans="log10",breaks=ylims_log,labels=ylabels_log,expand=expansion(mult=c(.02,.02))) +
+scale_x_continuous(labels=xlabels,expand=expansion(mult=c(.02,.04))) +geom_point() + labs(x = "Total Population")
+gCOUNTY_log_Scatter_POP
+}
+
+
+
+### Log Graph - PopDensity County wise
+{
+FINAL_COUNTY_COUNTYLVL = aggregate(Cases~DateAsInteger+Date+County+PopDensity2010,FINAL_COUNTY_CASES,FUN=sum)
+
+ylims_log = c(0,5,10,5000,10000,25000,150000)
+ylabels_log = c("log 0","log 5","log 10","log 5K","log 10K","log 25K","log 150K")
+
+gCOUNTY_log_POP_D =  ggplot(data=FINAL_COUNTY_COUNTYLVL,aes(x=Date,y=Cases, color = PopDensity2010)) + theme_minimal() +
+                  scale_y_continuous(trans="log10",breaks=ylims_log,labels=ylabels_log,expand=expansion(mult=c(.02,.02))) +
+                  coord_cartesian(xlim=c(ymd(20200224,tz="UTC"),ymd(20200505,tz="UTC"))) +
+                  geom_point(size=1.5) + labs(colour = "Population Density") +
+                  geom_text_repel(data=FINAL_COUNTY_COUNTYLVL %>% 
+                                  filter(DateAsInteger==as.integer(as.Date("2020-04-24")) & County %in% c("New York City")),
+                                  aes(x=Date,y=Cases,label=paste(County,": ",Cases,sep="")),nudge_y = -log(1.5),nudge_x=ymd(20200424,tz="UTC"),
+                                  size=3,segment.size=.05,show.legend=FALSE) +
+                                    labs(title="Counties with COVID-19 Cases\n(02/24 - 04/24)",
+                       y="COVID-19 cases",
+                       x="Date") +
+                  theme(plot.title=element_text(size=12,color="black",hjust=0.5,face="bold"),
+                        axis.title.x=element_text(size=12,color="black",face="bold"),
+                        axis.title.y=element_text(size=12,color="black",face="bold"),
+                        axis.text.x=element_text(size=10,color="black"),
+                        axis.text.y=element_text(size=10,color="black")) +
+                  theme(panel.grid.minor=element_blank()) 
+gCOUNTY_log_POP_D
+}
+
+### Scatter plot - PopDensity County wise
+{
+ylims_log = c(0,5,10,100,1000, 10000,100000, 150000)
+ylabels_log = c("log 0","log 5","log 10","log 100","log 1000","log 10K","log 100K","log 150K")
+gCOUNTY_log_Scatter_POP_D = ggplot(FINAL_COUNTY_CASES %>% filter(DateAsInteger == as.integer(as.Date("2020-04-24"))) , aes(x = PopDensity2010 , y = Cases)) + theme_minimal() + scale_y_continuous(trans="log10",breaks=ylims_log,labels=ylabels_log,expand=expansion(mult=c(.02,.02))) + geom_point() + labs(x = "Population Density")
+gCOUNTY_log_Scatter_POP_D
+}
+
+
+
+
+### Log Graph - HH County wise
+{
+FINAL_COUNTY_COUNTYLVL = aggregate(Cases~DateAsInteger+Date+County+Households,FINAL_COUNTY_CASES,FUN=sum)
+
+ylims_log = c(0,5,10,5000,10000,25000,150000)
+ylabels_log = c("log 0","log 5","log 10","log 5K","log 10K","log 25K","log 150K")
+
+gCOUNTY_log_HH =  ggplot(data=FINAL_COUNTY_COUNTYLVL,aes(x=Date,y=Cases, color = Households)) + theme_minimal() +
+                  scale_y_continuous(trans="log10",breaks=ylims_log,labels=ylabels_log,expand=expansion(mult=c(.02,.02))) +
+                  coord_cartesian(xlim=c(ymd(20200224,tz="UTC"),ymd(20200505,tz="UTC"))) +
+                  geom_point(size=1.5) + labs(colour = "Number of Households") +
+                  geom_text_repel(data=FINAL_COUNTY_COUNTYLVL %>% 
+                                  filter(DateAsInteger==as.integer(as.Date("2020-04-24")) & County %in% c("New York City")),
+                                  aes(x=Date,y=Cases,label=paste(County,": ",Cases,sep="")),nudge_y = -log(1.5),nudge_x=ymd(20200424,tz="UTC"),
+                                  size=3,segment.size=.05,show.legend=FALSE) +
+                                    labs(title="Counties with COVID-19 Cases\n(02/24 - 04/24)",
+                       y="COVID-19 cases",
+                       x="Date") +
+                  theme(plot.title=element_text(size=12,color="black",hjust=0.5,face="bold"),
+                        axis.title.x=element_text(size=12,color="black",face="bold"),
+                        axis.title.y=element_text(size=12,color="black",face="bold"),
+                        axis.text.x=element_text(size=10,color="black"),
+                        axis.text.y=element_text(size=10,color="black")) +
+                  theme(panel.grid.minor=element_blank()) 
+gCOUNTY_log_HH
+}
+
+### Scatter plot - HH County wise
+{
+ylims_log = c(0,5,10,100,1000, 10000,100000, 150000)
+ylabels_log = c("log 0","log 5","log 10","log 100","log 1000","log 10K","log 100K","log 150K")
+
+xlabels = c("0","1000000","2000000","3000000")
+
+gCOUNTY_log_Scatter_HH = ggplot(FINAL_COUNTY_CASES %>% filter(DateAsInteger == as.integer(as.Date("2020-04-24"))) , aes(x = Households , y = Cases)) + theme_minimal() + scale_y_continuous(trans="log10",breaks=ylims_log,labels=ylabels_log,expand=expansion(mult=c(.02,.02))) +
+scale_x_continuous(labels=xlabels,expand=expansion(mult=c(.02,.04))) + geom_point() + labs(x = "Number of Households")
+gCOUNTY_log_Scatter_HH
+}
+
+
+### Log Graph - Metro County wise
+{
+FINAL_COUNTY_COUNTYLVL = aggregate(Cases~DateAsInteger+Date+County+MetroNonMetro,FINAL_COUNTY_CASES,FUN=sum)
+
+ylims_log = c(0,5,10,5000,10000,25000,150000)
+ylabels_log = c("log 0","log 5","log 10","log 5K","log 10K","log 25K","log 150K")
+
+gCOUNTY_log_METRO =  ggplot(data=FINAL_COUNTY_COUNTYLVL,aes(x=Date,y=Cases, color = MetroNonMetro)) + theme_minimal() +
+                  scale_y_continuous(trans="log10",breaks=ylims_log,labels=ylabels_log,expand=expansion(mult=c(.02,.02))) +
+                  coord_cartesian(xlim=c(ymd(20200224,tz="UTC"),ymd(20200429,tz="UTC"))) +
+                  geom_point(size=1.5) +
+                  geom_text_repel(data=FINAL_COUNTY_COUNTYLVL %>% 
+                                  filter(DateAsInteger==as.integer(as.Date("2020-04-24")) & County %in% c("New York City")),
+                                  aes(x=Date,y=Cases,label=paste(County,": ",Cases,sep="")),nudge_y = -log(1.5),nudge_x=ymd(20200424,tz="UTC"),
+                                  size=3,segment.size=.05,show.legend=FALSE) +
+                  scale_color_manual(values=c("#F8766D","#619CFF"),
+                                     labels= c("Metro (844 Counties)","Non Metro (745 Counties)"),
+                                     name=element_blank()) +
+                                    labs(title="Counties with COVID-19 Cases\n(02/24 - 04/24)",
+                       y="COVID-19 cases",
+                       x="Date") +
+                  theme(plot.title=element_text(size=12,color="black",hjust=0.5,face="bold"),
+                        axis.title.x=element_text(size=12,color="black",face="bold"),
+                        axis.title.y=element_text(size=12,color="black",face="bold"),
+                        axis.text.x=element_text(size=10,color="black"),
+                        axis.text.y=element_text(size=10,color="black")) +
+                  theme(panel.grid.minor=element_blank()) 
+gCOUNTY_log_METRO
+}
+```
+
