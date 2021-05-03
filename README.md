@@ -1,4 +1,4 @@
-# Exploring COVID-19 Cases & Spread
+# Exploring COVID-19 Cases & Spread in R
 
 # Introduction
 
